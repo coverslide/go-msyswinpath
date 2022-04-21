@@ -84,15 +84,15 @@ func cleanupWinPath(volatileData stringMap, winPath string) string {
 				fixedPath = strings.ReplaceAll(fixedPath, replaceStr, value)
 			} else {
 				logDebug("Unknown variable: %q\n", variableName)
-        return ""
+				return ""
 			}
 		}
 	}
-  return fixedPath
+	return fixedPath
 }
 
 func convertWinPathToUnix(winPath string) string {
-  fixedPath := winPath
+	fixedPath := winPath
 	driveLetterMatch := winDriveLetterRegex.FindStringSubmatch(fixedPath)
 	if len(driveLetterMatch) == 0 {
 		logDebug("No drive: %s\n", winPath)
@@ -175,9 +175,9 @@ func main() {
 	}
 
 	debugPtr := flag.Bool("debug", false, "Enable debug mode")
-  flag.BoolVar(debugPtr, "d", false, "Enable debug mode")
+	flag.BoolVar(debugPtr, "d", false, "Enable debug mode")
 	existencePtr := flag.Bool("exists", false, "Check if directory exists")
-  flag.BoolVar(existencePtr, "e", false, "Check if directory exists")
+	flag.BoolVar(existencePtr, "e", false, "Check if directory exists")
 
 	flag.Parse()
 
