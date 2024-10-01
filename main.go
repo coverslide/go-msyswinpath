@@ -133,8 +133,18 @@ func winPathExists(winPath string) error {
 	return nil
 }
 
-func extractPathData(volatileData stringMap, envMaps ...stringMap) string {
+func extractPathData(envMaps ...stringMap) string {
 	truePaths := make(map[string]struct{})
+
+  combinedMaps := make(stringMap)
+  for _, singleMap := range envMaps {
+    for key, val := range singleMap {
+      if oldVal, ok := combinedMaps[key] ; ok {
+        logDebug("Key already set: %q : %q => %q\n", key, oldVal, val)
+      }
+      combinedMaps[key] = val
+    }
+  }
 
 	var allPaths []string
 	for _, envMap := range envMaps {
@@ -143,7 +153,7 @@ func extractPathData(volatileData stringMap, envMaps ...stringMap) string {
 			pathsSlice := strings.Split(paths, ";")
 			realPaths := make([]string, len(pathsSlice))
 			for _, path := range pathsSlice {
-				cleanPath := cleanupWinPath(volatileData, path)
+				cleanPath := cleanupWinPath(combinedMaps, path)
 				if cleanPath == "" {
 					continue
 				}
