@@ -8,6 +8,10 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 type stringMap map[string]string
@@ -158,7 +162,7 @@ func extractPathData(envMaps ...stringMap) string {
 					continue
 				}
 				if err := winPathExists(cleanPath); err != nil {
-					logDebug("Invalid Path: %q, %e\n", cleanPath, err.Error())
+					logDebug("Invalid Path: %q, %s\n", cleanPath, err.Error())
 					continue
 				}
 				unixPath := convertWinPathToUnix(cleanPath)
@@ -178,12 +182,202 @@ func extractPathData(envMaps ...stringMap) string {
 	return strings.Join(allPaths, ":")
 }
 
+func getUserPath() (string, error) {
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.READ)
+	if err != nil {
+		return "", fmt.Errorf("opening registry: %w", err)
+	}
+	defer key.Close()
+
+	val, _, err := key.GetStringValue("PATH")
+	if err != nil {
+		if err == registry.ErrNotExist {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading PATH: %w", err)
+	}
+	return val, nil
+}
+
+func setUserPath(pathValue string) error {
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, `Environment`, registry.WRITE)
+	if err != nil {
+		return fmt.Errorf("opening registry for write: %w", err)
+	}
+	defer key.Close()
+
+	if pathValue == "" {
+		if err := key.DeleteValue("PATH"); err != nil && err != registry.ErrNotExist {
+			return fmt.Errorf("deleting PATH: %w", err)
+		}
+	} else {
+		if err := key.SetStringValue("PATH", pathValue); err != nil {
+			return fmt.Errorf("writing PATH: %w", err)
+		}
+	}
+
+	broadcastEnvChange()
+	return nil
+}
+
+func broadcastEnvChange() {
+	user32 := syscall.NewLazyDLL("user32.dll")
+	procSendMessageTimeout := user32.NewProc("SendMessageTimeoutW")
+
+	const HWND_BROADCAST = uintptr(0xFFFF)
+	const WM_SETTINGCHANGE = 0x001A
+	const SMTO_BLOCK = 0x0001
+	const timeout = 5000
+
+	envStr, _ := syscall.UTF16PtrFromString("Environment")
+	procSendMessageTimeout.Call(
+		HWND_BROADCAST,
+		WM_SETTINGCHANGE,
+		0,
+		uintptr(unsafe.Pointer(envStr)),
+		SMTO_BLOCK,
+		uintptr(timeout),
+		0,
+	)
+}
+
+func listPaths() error {
+	rawPath, err := getUserPath()
+	if err != nil {
+		return err
+	}
+	if rawPath == "" {
+		return nil
+	}
+
+	entries := strings.Split(rawPath, ";")
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed != "" {
+			fmt.Println(trimmed)
+		}
+	}
+	return nil
+}
+
+func addPathToRegistry(newPath string) error {
+	rawPath, err := getUserPath()
+	if err != nil {
+		return err
+	}
+
+	newPath = strings.TrimSpace(newPath)
+	if newPath == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	var entries []string
+	if rawPath != "" {
+		entries = strings.Split(rawPath, ";")
+	}
+
+	normalizedNew := strings.ToUpper(strings.TrimRight(newPath, "\\"))
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		normalized := strings.ToUpper(strings.TrimRight(trimmed, "\\"))
+		if normalized == normalizedNew {
+			return nil
+		}
+	}
+
+	entries = append(entries, newPath)
+	newValue := strings.Join(entries, ";")
+	return setUserPath(newValue)
+}
+
+func removePathFromRegistry(targetPath string) error {
+	rawPath, err := getUserPath()
+	if err != nil {
+		return err
+	}
+
+	targetPath = strings.TrimSpace(targetPath)
+	if targetPath == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	if rawPath == "" {
+		return nil
+	}
+
+	entries := strings.Split(rawPath, ";")
+	normalizedTarget := strings.ToUpper(strings.TrimRight(targetPath, "\\"))
+
+	var remaining []string
+	found := false
+	for _, entry := range entries {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		normalized := strings.ToUpper(strings.TrimRight(trimmed, "\\"))
+		if normalized == normalizedTarget {
+			found = true
+			continue
+		}
+		remaining = append(remaining, trimmed)
+	}
+
+	if !found {
+		return nil
+	}
+
+	newValue := strings.Join(remaining, ";")
+	return setUserPath(newValue)
+}
+
 func main() {
 	if runtime.GOOS != "windows" {
 		fmt.Fprintf(os.Stderr, "This tool was meant to be run on windows")
 		os.Exit(1)
 	}
 
+	if len(os.Args) < 2 {
+		printMSYSPath()
+		return
+	}
+
+	subcommand := os.Args[1]
+	switch subcommand {
+	case "add":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: %s add <path>\n", os.Args[0])
+			os.Exit(1)
+		}
+		if err := addPathToRegistry(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "remove":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: %s remove <path>\n", os.Args[0])
+			os.Exit(1)
+		}
+		if err := removePathFromRegistry(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "list":
+		if err := listPaths(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Usage: %s [add|remove|list] [path]\n", os.Args[0])
+		os.Exit(1)
+	}
+}
+
+func printMSYSPath() {
 	debugPtr := flag.Bool("debug", false, "Enable debug mode")
 	flag.BoolVar(debugPtr, "d", false, "Enable debug mode")
 	existencePtr := flag.Bool("exists", false, "Check if directory exists")
